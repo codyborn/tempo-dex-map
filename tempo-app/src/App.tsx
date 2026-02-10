@@ -8,6 +8,18 @@ import {
   type TokenNode,
 } from "./fetchTokens";
 
+// ── URL params ────────────────────────────────────────────────────
+
+function parseInitialParams(): { minTvl: number; excluded: string[] } {
+  const params = new URLSearchParams(window.location.search);
+  const tvl = parseFloat(params.get("minTvl") || "0");
+  const exc = params.get("exclude");
+  return {
+    minTvl: Number.isFinite(tvl) && tvl > 0 ? tvl : 0,
+    excluded: exc ? exc.split(",").filter(Boolean) : [],
+  };
+}
+
 // ── Hooks ─────────────────────────────────────────────────────────
 
 function useWindowSize() {
@@ -312,12 +324,14 @@ function TokenFilter({
 // ── App ───────────────────────────────────────────────────────────
 
 export default function App() {
+  const [initialParams] = useState(parseInitialParams);
   const [allTokens, setAllTokens] = useState<TokenInfo[]>([]);
   const [progress, setProgress] = useState("Initializing...");
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [minTvl, setMinTvl] = useState(0);
-  const [excluded, setExcluded] = useState<string[]>([]);
+  const [minTvl, setMinTvl] = useState(initialParams.minTvl);
+  const [excluded, setExcluded] = useState<string[]>(initialParams.excluded);
+  const [copied, setCopied] = useState(false);
   const { width, height } = useWindowSize();
 
   // Accumulate tokens in a ref; periodically flush into state
@@ -408,6 +422,18 @@ export default function App() {
 
   const currencies = useMemo(() => countCurrencies(root), [root]);
 
+  function handleShare() {
+    const params = new URLSearchParams();
+    if (minTvl > 0) params.set("minTvl", minTvl.toFixed(2));
+    if (excluded.length > 0) params.set("exclude", excluded.join(","));
+    const qs = params.toString();
+    const url = window.location.origin + window.location.pathname + (qs ? `?${qs}` : "");
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
   const mapWidth = Math.max(width - 40, 600);
   const mapHeight = Math.max(height - 170, 350);
 
@@ -454,6 +480,23 @@ export default function App() {
             suggestions={tokenSymbols}
           />
           <TvlSlider value={minTvl} maxTvl={maxTvl} onChange={setMinTvl} />
+          <button
+            onClick={handleShare}
+            style={{
+              padding: "6px 12px",
+              borderRadius: "8px",
+              border: "1px solid #334155",
+              background: copied ? "#22c55e" : "#1e293b",
+              color: copied ? "#fff" : "#94a3b8",
+              cursor: "pointer",
+              fontSize: "12px",
+              fontWeight: 500,
+              whiteSpace: "nowrap",
+              transition: "background 0.2s, color 0.2s",
+            }}
+          >
+            {copied ? "Copied!" : "Share"}
+          </button>
           {!done && (
             <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
               <div className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }} />
