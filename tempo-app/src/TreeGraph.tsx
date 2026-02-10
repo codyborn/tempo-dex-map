@@ -260,7 +260,7 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
     }
 
     node
-      .on("mouseenter", (event, d) => {
+      .on("mouseenter", (_event, d) => {
         const nd = d.data;
         tooltipDiv
           .style("display", "block")
