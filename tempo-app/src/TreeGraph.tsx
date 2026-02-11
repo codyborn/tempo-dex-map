@@ -69,12 +69,14 @@ function radialPoint(angle: number, radius: number): [number, number] {
 export default function TreeGraph({ root, width, height }: TreeGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const zoomRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
+  const selectedRef = useRef<string | null>(null);
 
   const draw = useCallback(() => {
     if (!svgRef.current) return;
 
     const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove();
+    selectedRef.current = null;
 
     const data = toHNode(root);
     const hierarchy = d3.hierarchy(data);
@@ -90,6 +92,10 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
     const treeRoot = treeLayout(hierarchy);
     const nodes = treeRoot.descendants();
     const links = treeRoot.links();
+
+    // Build a lookup from address to hierarchy node (for path tracing)
+    const nodeByAddr = new Map<string, d3.HierarchyPointNode<HNode>>();
+    for (const n of nodes) nodeByAddr.set(n.data.address, n);
 
     // Root group that gets zoomed/panned
     const g = svg.append("g");
@@ -110,8 +116,7 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
 
     // ── Edges ──────────────────────────────────────────────────
 
-    // Radial link generator
-    g.append("g")
+    const linkSelection = g.append("g")
       .attr("fill", "none")
       .selectAll("path")
       .data(links)
@@ -123,7 +128,6 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
         const targetRadius = d.target.y;
         const [sx, sy] = radialPoint(sourceAngle, sourceRadius);
         const [tx, ty] = radialPoint(targetAngle, targetRadius);
-        // Curved path via a control point at source radius, target angle
         const [cx, cy] = radialPoint(targetAngle, sourceRadius);
         return `M${sx},${sy}Q${cx},${cy} ${tx},${ty}`;
       })
@@ -137,12 +141,12 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
       });
 
     // Edge TVL labels — placed at midpoint of each link
-    const edgeLabels = g.append("g")
+    const edgeLabelSelection = g.append("g")
       .selectAll("text")
       .data(links)
       .join("text");
 
-    edgeLabels.each(function (d) {
+    edgeLabelSelection.each(function (d) {
       const sourceAngle = d.source.x;
       const sourceRadius = d.source.y;
       const targetAngle = d.target.x;
@@ -154,7 +158,6 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
       const tvl = d.target.data.totalSupply;
       if (tvl <= 0) return;
 
-      // Only show labels when there's enough space (skip if too many nodes packed together)
       const showLabel = leafCount < 60 || tvl >= 1_000;
 
       if (showLabel) {
@@ -173,9 +176,9 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
 
     // ── Nodes ──────────────────────────────────────────────────
 
-    const node = g
+    const nodeSelection = g
       .append("g")
-      .selectAll("g")
+      .selectAll<SVGGElement, d3.HierarchyPointNode<HNode>>("g")
       .data(nodes)
       .join("g")
       .attr("transform", (d) => {
@@ -185,7 +188,7 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
       });
 
     // Node circles
-    node
+    nodeSelection
       .append("circle")
       .attr("r", (d) => {
         if (d.depth === 0) return 16;
@@ -202,12 +205,11 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
       .style("cursor", "pointer");
 
     // Node symbol labels — radially oriented, outside the circle
-    node
+    nodeSelection
       .append("text")
       .attr("dy", "0.35em")
       .attr("text-anchor", (d) => {
         if (d.depth === 0) return "middle";
-        // Left side of circle: right-align text; right side: left-align
         const angle = d.x;
         return angle > Math.PI ? "end" : "start";
       })
@@ -216,7 +218,6 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
         const angle = d.x;
         const r = d.data.totalSupply >= 1_000_000 ? 8 : d.data.totalSupply >= 1_000 ? 6 : 4;
         const offset = r + 5;
-        // Rotate text to follow the radial direction
         const rotateDeg = ((angle * 180) / Math.PI - 90);
         const flip = angle > Math.PI;
         return `rotate(${flip ? rotateDeg + 180 : rotateDeg})translate(${flip ? -offset : offset},0)`;
@@ -227,7 +228,7 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
       .text((d) => d.data.symbol);
 
     // Root TVL label
-    node
+    nodeSelection
       .filter((d) => d.depth === 0 && d.data.totalSupply > 0)
       .append("text")
       .attr("dy", "0.35em")
@@ -236,6 +237,94 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
       .attr("fill", "#64748b")
       .attr("font-size", "10px")
       .text((d) => formatTvl(d.data.totalSupply));
+
+    // ── Path highlighting on click ────────────────────────────
+
+    function applySelection(pathAddrs: Set<string> | null) {
+      const DUR = 350;
+
+      if (!pathAddrs) {
+        // Reset — show everything
+        nodeSelection
+          .transition().duration(DUR)
+          .style("opacity", 1)
+          .style("pointer-events", "auto");
+
+        linkSelection
+          .transition().duration(DUR)
+          .style("opacity", 1)
+          .attr("stroke-width", (d) => {
+            const tvl = d.target.data.totalSupply;
+            if (tvl >= 1_000_000) return 2.5;
+            if (tvl >= 1_000) return 1.8;
+            return 1;
+          });
+
+        edgeLabelSelection
+          .transition().duration(DUR)
+          .style("opacity", 1);
+        return;
+      }
+
+      // Highlight path, hide the rest
+      nodeSelection
+        .transition().duration(DUR)
+        .style("opacity", (d) => pathAddrs.has(d.data.address) ? 1 : 0.04)
+        .style("pointer-events", (d) => pathAddrs.has(d.data.address) ? "auto" : "none");
+
+      linkSelection
+        .transition().duration(DUR)
+        .style("opacity", (d) =>
+          pathAddrs.has(d.source.data.address) && pathAddrs.has(d.target.data.address) ? 1 : 0.03
+        )
+        .attr("stroke-width", (d) => {
+          const onPath = pathAddrs.has(d.source.data.address) && pathAddrs.has(d.target.data.address);
+          if (onPath) return 3;
+          const tvl = d.target.data.totalSupply;
+          if (tvl >= 1_000_000) return 2.5;
+          if (tvl >= 1_000) return 1.8;
+          return 1;
+        });
+
+      edgeLabelSelection
+        .transition().duration(DUR)
+        .style("opacity", (d) =>
+          pathAddrs.has(d.source.data.address) && pathAddrs.has(d.target.data.address) ? 1 : 0.03
+        );
+    }
+
+    nodeSelection.on("click", (_event, d) => {
+      _event.stopPropagation();
+
+      const addr = d.data.address;
+
+      // Clicking the same node again, or the root → deselect
+      if (selectedRef.current === addr || d.depth === 0) {
+        selectedRef.current = null;
+        applySelection(null);
+        return;
+      }
+
+      selectedRef.current = addr;
+
+      // Walk ancestors to build the path set
+      const pathAddrs = new Set<string>();
+      let cur: d3.HierarchyPointNode<HNode> | null = d;
+      while (cur) {
+        pathAddrs.add(cur.data.address);
+        cur = cur.parent;
+      }
+
+      applySelection(pathAddrs);
+    });
+
+    // Click SVG background to deselect
+    svg.on("click", () => {
+      if (selectedRef.current) {
+        selectedRef.current = null;
+        applySelection(null);
+      }
+    });
 
     // ── Tooltip on hover ───────────────────────────────────────
 
@@ -259,7 +348,7 @@ export default function TreeGraph({ root, width, height }: TreeGraphProps) {
         .style("display", "none");
     }
 
-    node
+    nodeSelection
       .on("mouseenter", (_event, d) => {
         const nd = d.data;
         tooltipDiv
