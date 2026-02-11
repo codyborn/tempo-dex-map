@@ -170,6 +170,31 @@ function countCurrencies(node: TokenNode): Map<string, number> {
   return map;
 }
 
+// ── Wildcard helpers ──────────────────────────────────────────────
+
+/** Convert a wildcard pattern (e.g. "A*") to a RegExp that matches the full string. */
+function wildcardToRegex(pattern: string): RegExp {
+  // Escape regex special chars except *, then convert * to .*
+  const escaped = pattern.replace(/([.+?^${}()|[\]\\])/g, "\\$1").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`, "i");
+}
+
+function isWildcard(pattern: string): boolean {
+  return pattern.includes("*");
+}
+
+/** Test if a symbol matches any of the excluded patterns (exact or wildcard). */
+function matchesExcluded(symbol: string, patterns: string[]): boolean {
+  for (const p of patterns) {
+    if (isWildcard(p)) {
+      if (wildcardToRegex(p).test(symbol)) return true;
+    } else {
+      if (symbol.toLowerCase() === p.toLowerCase()) return true;
+    }
+  }
+  return false;
+}
+
 // ── Token Exclude Filter ──────────────────────────────────────────
 
 function TokenFilter({
@@ -187,17 +212,29 @@ function TokenFilter({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const filtered = query.length > 0
+  const hasWildcard = isWildcard(query);
+
+  // For wildcard queries, count matches; for plain queries, list matching suggestions
+  const wildcardMatchCount = useMemo(() => {
+    if (!hasWildcard || query.length === 0) return 0;
+    const re = wildcardToRegex(query);
+    return suggestions.filter((s) => re.test(s) && !matchesExcluded(s, excluded)).length;
+  }, [query, hasWildcard, suggestions, excluded]);
+
+  const filtered = query.length > 0 && !hasWildcard
     ? suggestions
-        .filter((s) => s.toLowerCase().includes(query.toLowerCase()) && !excluded.includes(s))
+        .filter((s) => s.toLowerCase().includes(query.toLowerCase()) && !matchesExcluded(s, excluded))
         .slice(0, 8)
     : [];
 
   function addToken(name: string) {
-    onAdd(name);
+    if (!name.trim()) return;
+    onAdd(name.trim());
     setQuery("");
     setShowSuggestions(false);
   }
+
+  const showDropdown = showSuggestions && (filtered.length > 0 || (hasWildcard && wildcardMatchCount > 0));
 
   return (
     <div style={{ position: "relative" }}>
@@ -221,11 +258,11 @@ function TokenFilter({
               display: "inline-flex",
               alignItems: "center",
               gap: "4px",
-              background: "#334155",
+              background: isWildcard(name) ? "#3b2f1e" : "#334155",
               borderRadius: "4px",
               padding: "2px 6px",
               fontSize: "11px",
-              color: "#e2e8f0",
+              color: isWildcard(name) ? "#fbbf24" : "#e2e8f0",
               whiteSpace: "nowrap",
             }}
           >
@@ -250,7 +287,7 @@ function TokenFilter({
           ref={inputRef}
           type="text"
           value={query}
-          placeholder="Exclude token..."
+          placeholder="Exclude token... (* = wildcard)"
           onChange={(e) => {
             setQuery(e.target.value);
             setShowSuggestions(true);
@@ -258,8 +295,12 @@ function TokenFilter({
           onFocus={() => setShowSuggestions(true)}
           onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && filtered.length > 0) {
-              addToken(filtered[0]);
+            if (e.key === "Enter") {
+              if (hasWildcard && wildcardMatchCount > 0) {
+                addToken(query);
+              } else if (filtered.length > 0) {
+                addToken(filtered[0]);
+              }
             }
             if (e.key === "Escape") {
               setShowSuggestions(false);
@@ -278,7 +319,7 @@ function TokenFilter({
           }}
         />
       </div>
-      {showSuggestions && filtered.length > 0 && (
+      {showDropdown && (
         <div
           style={{
             position: "absolute",
@@ -294,12 +335,11 @@ function TokenFilter({
             overflowY: "auto",
           }}
         >
-          {filtered.map((name) => (
+          {hasWildcard ? (
             <button
-              key={name}
               onMouseDown={(e) => {
                 e.preventDefault();
-                addToken(name);
+                addToken(query);
               }}
               style={{
                 display: "block",
@@ -307,7 +347,7 @@ function TokenFilter({
                 textAlign: "left",
                 background: "none",
                 border: "none",
-                color: "#e2e8f0",
+                color: "#fbbf24",
                 fontSize: "12px",
                 padding: "6px 10px",
                 cursor: "pointer",
@@ -315,9 +355,34 @@ function TokenFilter({
               onMouseEnter={(e) => (e.currentTarget.style.background = "#334155")}
               onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
             >
-              {name}
+              {query} <span style={{ color: "#64748b" }}>({wildcardMatchCount} tokens match)</span>
             </button>
-          ))}
+          ) : (
+            filtered.map((name) => (
+              <button
+                key={name}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  addToken(name);
+                }}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  textAlign: "left",
+                  background: "none",
+                  border: "none",
+                  color: "#e2e8f0",
+                  fontSize: "12px",
+                  padding: "6px 10px",
+                  cursor: "pointer",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "#334155")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+              >
+                {name}
+              </button>
+            ))
+          )}
         </div>
       )}
     </div>
@@ -415,11 +480,10 @@ export default function App() {
     return [...set].sort();
   }, [allTokens]);
 
-  // Filter out excluded tokens, then build the tree
+  // Filter out excluded tokens (supports wildcard patterns like "A*")
   const filteredTokens = useMemo(() => {
     if (excluded.length === 0) return allTokens;
-    const excludeSet = new Set(excluded.map((s) => s.toLowerCase()));
-    return allTokens.filter((t) => !excludeSet.has(t.symbol.toLowerCase()));
+    return allTokens.filter((t) => !matchesExcluded(t.symbol, excluded));
   }, [allTokens, excluded]);
 
   const { root, tokenCount, visibleCount } = useMemo(
