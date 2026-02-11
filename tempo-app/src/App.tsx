@@ -7,16 +7,19 @@ import {
   type TokenInfo,
   type TokenNode,
 } from "./fetchTokens";
+import { NETWORKS, type NetworkId } from "./chain";
 
 // ── URL params ────────────────────────────────────────────────────
 
-function parseInitialParams(): { minTvl: number; excluded: string[] } {
+function parseInitialParams(): { minTvl: number; excluded: string[]; network: NetworkId } {
   const params = new URLSearchParams(window.location.search);
   const tvl = parseFloat(params.get("minTvl") || "0");
   const exc = params.get("exclude");
+  const net = params.get("network");
   return {
     minTvl: Number.isFinite(tvl) && tvl > 0 ? tvl : 0,
     excluded: exc ? exc.split(",").filter(Boolean) : [],
+    network: net === "testnet" ? "testnet" : "mainnet",
   };
 }
 
@@ -331,6 +334,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [minTvl, setMinTvl] = useState(initialParams.minTvl);
   const [excluded, setExcluded] = useState<string[]>(initialParams.excluded);
+  const [networkId, setNetworkId] = useState<NetworkId>(initialParams.network);
   const [copied, setCopied] = useState(false);
   const { width, height } = useWindowSize();
 
@@ -353,6 +357,8 @@ export default function App() {
     }, 600);
   }, [flush]);
 
+  const network = NETWORKS[networkId];
+
   const load = useCallback(async () => {
     try {
       setError(null);
@@ -361,11 +367,12 @@ export default function App() {
       pendingRef.current = [];
 
       setProgress("Fetching genesis tokens...");
-      const genesis = await fetchGenesisTokens();
+      const genesis = await fetchGenesisTokens(network);
       setAllTokens(genesis);
 
       setProgress("Streaming factory tokens...");
       await streamFactoryTokens(
+        network,
         (newTokens, progressMsg) => {
           setProgress(progressMsg);
           if (newTokens.length > 0) {
@@ -386,7 +393,7 @@ export default function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [flush, scheduleFlush]);
+  }, [flush, scheduleFlush, network]);
 
   useEffect(() => {
     load();
@@ -424,6 +431,7 @@ export default function App() {
 
   function handleShare() {
     const params = new URLSearchParams();
+    if (networkId !== "mainnet") params.set("network", networkId);
     if (minTvl > 0) params.set("minTvl", minTvl.toFixed(2));
     if (excluded.length > 0) params.set("exclude", excluded.join(","));
     const qs = params.toString();
@@ -467,7 +475,7 @@ export default function App() {
           </h1>
           <div style={{ color: "#64748b", fontSize: "12px", marginTop: "2px" }}>
             {visibleCount.toLocaleString()} of {tokenCount.toLocaleString()} tokens shown
-            {" "}&middot; Mainnet
+            {" "}&middot; {network.label}
             {!done && <> &middot; {progress}</>}
             {" "}&middot; Scroll to zoom, drag to pan
           </div>
@@ -480,6 +488,35 @@ export default function App() {
             suggestions={tokenSymbols}
           />
           <TvlSlider value={minTvl} maxTvl={maxTvl} onChange={setMinTvl} />
+          {/* Network toggle */}
+          <div
+            style={{
+              display: "flex",
+              borderRadius: "8px",
+              border: "1px solid #334155",
+              overflow: "hidden",
+            }}
+          >
+            {(["mainnet", "testnet"] as const).map((net) => (
+              <button
+                key={net}
+                onClick={() => setNetworkId(net)}
+                style={{
+                  padding: "6px 12px",
+                  border: "none",
+                  background: networkId === net ? "#3b82f6" : "#1e293b",
+                  color: networkId === net ? "#fff" : "#64748b",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  fontWeight: networkId === net ? 600 : 400,
+                  whiteSpace: "nowrap",
+                  transition: "background 0.2s, color 0.2s",
+                }}
+              >
+                {NETWORKS[net].label}
+              </button>
+            ))}
+          </div>
           <button
             onClick={handleShare}
             style={{

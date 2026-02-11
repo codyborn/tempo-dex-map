@@ -8,7 +8,7 @@ import {
   zeroAddress,
   formatUnits,
 } from "viem";
-import { tempo, RPC_URL, RPC_AUTH, PRECOMPILES, GENESIS_TOKENS } from "./chain";
+import type { NetworkConfig } from "./chain";
 import { tip20Abi, tip20FactoryAbi, multicall3Abi } from "./abi";
 
 export interface TokenInfo {
@@ -30,14 +30,22 @@ export interface TokenNode {
   children: TokenNode[];
 }
 
-const client = createPublicClient({
-  chain: tempo,
-  transport: http(RPC_URL, {
-    fetchOptions: {
-      headers: { Authorization: RPC_AUTH },
-    },
-  }),
-});
+function makeClient(network: NetworkConfig) {
+  const headers: Record<string, string> = {};
+  if (network.rpcAuth) {
+    headers["Authorization"] = network.rpcAuth;
+  }
+  return createPublicClient({
+    chain: network.chain,
+    transport: http(network.rpcUrl, {
+      fetchOptions: {
+        headers,
+      },
+    }),
+  });
+}
+
+type Client = ReturnType<typeof makeClient>;
 
 // ── Multicall totalSupply helper ──────────────────────────────────
 
@@ -46,7 +54,7 @@ const totalSupplyCallData = encodeFunctionData({
   functionName: "totalSupply",
 });
 
-async function batchFetchSupplies(addresses: Address[]): Promise<Map<string, number>> {
+async function batchFetchSupplies(client: Client, precompiles: NetworkConfig["precompiles"], addresses: Address[]): Promise<Map<string, number>> {
   const result = new Map<string, number>();
   if (addresses.length === 0) return result;
 
@@ -55,7 +63,7 @@ async function batchFetchSupplies(addresses: Address[]): Promise<Map<string, num
     const batch = addresses.slice(i, i + BATCH);
     try {
       const response = await client.readContract({
-        address: PRECOMPILES.MULTICALL3,
+        address: precompiles.MULTICALL3,
         abi: multicall3Abi,
         functionName: "aggregate3",
         args: [batch.map((addr) => ({ target: addr, allowFailure: true, callData: totalSupplyCallData }))],
@@ -196,9 +204,10 @@ function subtreeTvl(node: TokenNode): number {
 // ── Data fetching ─────────────────────────────────────────────────
 
 /** Fetch genesis (pre-deployed) tokens including supply */
-export async function fetchGenesisTokens(): Promise<TokenInfo[]> {
+export async function fetchGenesisTokens(network: NetworkConfig): Promise<TokenInfo[]> {
+  const client = makeClient(network);
   const results: TokenInfo[] = [];
-  for (const addr of GENESIS_TOKENS) {
+  for (const addr of network.genesisTokens) {
     const [name, symbol, currency, quoteToken, totalSupply] = await Promise.all([
       client.readContract({ address: addr, abi: tip20Abi, functionName: "name" }),
       client.readContract({ address: addr, abi: tip20Abi, functionName: "symbol" }),
@@ -222,9 +231,11 @@ export async function fetchGenesisTokens(): Promise<TokenInfo[]> {
  * Stream factory tokens with totalSupply fetched via multicall per batch.
  */
 export async function streamFactoryTokens(
+  network: NetworkConfig,
   onBatch: (newTokens: TokenInfo[], progress: string) => void,
   onDone: () => void,
 ): Promise<void> {
+  const client = makeClient(network);
   const blockNumber = await client.getBlockNumber();
   const latest = Number(blockNumber);
 
@@ -239,7 +250,7 @@ export async function streamFactoryTokens(
   async function fetchRange(from: number, to: number): Promise<{ address: Address; name: string; symbol: string; currency: string; quoteToken: Address }[]> {
     try {
       const logs = await client.getLogs({
-        address: PRECOMPILES.TIP20_FACTORY,
+        address: network.precompiles.TIP20_FACTORY,
         event: tip20FactoryAbi[1],
         fromBlock: BigInt(from),
         toBlock: BigInt(to),
@@ -285,7 +296,7 @@ export async function streamFactoryTokens(
 
       // 2. Batch-fetch totalSupply via multicall
       const addresses = raw.map((t) => t.address);
-      const supplies = await batchFetchSupplies(addresses);
+      const supplies = await batchFetchSupplies(client, network.precompiles, addresses);
 
       // 3. Merge into TokenInfo
       const tokens: TokenInfo[] = raw.map((t) => ({
